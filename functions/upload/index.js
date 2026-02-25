@@ -3,7 +3,7 @@ import { fetchUploadConfig, fetchSecurityConfig } from "../utils/sysConfig";
 import {
     createResponse, getUploadIp, getIPAddress, resolveFileExt,
     moderateContent, purgeCDNCache, isBlockedUploadIp, buildUniqueFileId, endUpload, getImageDimensions,
-    sanitizeUploadFolder
+    sanitizeUploadFolder, smartContentType, addCharsetIfNeeded, validateAndNormalizeContentType, getMimeTypeBase
 } from "./uploadTools";
 import { initializeChunkedUpload, handleChunkUpload, uploadLargeFileToTelegram, handleCleanupRequest } from "./chunkUpload";
 import { handleChunkMerge } from "./chunkMerge";
@@ -129,7 +129,16 @@ async function processFileUpload(context, formdata = null) {
     // 获取文件信息
     const time = new Date().getTime();
     const file = formdata.get('file');
-    const fileType = file.type;
+    let fileType = formdata.get('customContentType') || file.type;
+    // 验证自定义 Content-Type（防注入）
+    if (formdata.get('customContentType')) {
+        fileType = validateAndNormalizeContentType(fileType);
+    }
+    // 智能修正：octet-stream + 文本扩展名 → text/plain
+    fileType = smartContentType(fileType, file.name);
+    // 文本类型自动添加 charset=utf-8
+    fileType = addCharsetIfNeeded(fileType);
+
     let fileName = file.name;
     const fileSizeBytes = file.size; // 文件大小，单位字节
     const fileSize = (fileSizeBytes / 1024 / 1024).toFixed(2); // 文件大小，单位MB
@@ -493,15 +502,16 @@ async function uploadFileToTelegram(context, fullId, metadata, fileExt, fileName
     };
 
     const defaultType = { 'url': 'sendDocument', 'type': 'document' };
+    const baseFileType = getMimeTypeBase(fileType);
 
-    let sendFunction = Object.keys(fileTypeMap).find(key => fileType.startsWith(key))
-        ? fileTypeMap[Object.keys(fileTypeMap).find(key => fileType.startsWith(key))]
+    let sendFunction = Object.keys(fileTypeMap).find(key => baseFileType.startsWith(key))
+        ? fileTypeMap[Object.keys(fileTypeMap).find(key => baseFileType.startsWith(key))]
         : defaultType;
 
     // GIF ICO 等发送接口特殊处理
-    if (fileType === 'image/gif' || fileType === 'image/webp' || fileExt === 'gif' || fileExt === 'webp') {
+    if (baseFileType === 'image/gif' || baseFileType === 'image/webp' || fileExt === 'gif' || fileExt === 'webp') {
         sendFunction = { 'url': 'sendAnimation', 'type': 'animation' };
-    } else if (fileType === 'image/svg+xml' || fileType === 'image/x-icon') {
+    } else if (baseFileType === 'image/svg+xml' || baseFileType === 'image/x-icon') {
         sendFunction = { 'url': 'sendDocument', 'type': 'document' };
     }
 

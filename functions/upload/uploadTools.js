@@ -465,6 +465,85 @@ export async function buildUniqueFileId(context, fileName, fileType = 'applicati
     }
 }
 
+// ==================== Content-Type 智能处理 ====================
+
+const TEXT_FILE_EXTENSIONS = [
+    'txt', 'log', 'md', 'markdown', 'rst', 'csv', 'tsv',
+    'json', 'xml', 'yaml', 'yml', 'toml', 'ini', 'cfg', 'conf', 'cnf',
+    'html', 'htm', 'css', 'scss', 'sass', 'less',
+    'js', 'jsx', 'mjs', 'cjs', 'ts', 'tsx',
+    'py', 'pyw', 'rb', 'php', 'java', 'kt', 'kts', 'scala',
+    'c', 'h', 'cpp', 'hpp', 'cc', 'cxx', 'cs', 'go', 'rs', 'swift',
+    'sh', 'bash', 'zsh', 'fish', 'bat', 'cmd', 'ps1', 'psm1',
+    'sql', 'graphql', 'gql',
+    'vue', 'svelte', 'astro',
+    'dockerfile', 'makefile', 'rakefile',
+    'env', 'gitignore', 'dockerignore', 'editorconfig',
+    'properties', 'gradle', 'sbt',
+    'r', 'R', 'lua', 'pl', 'pm', 'perl',
+];
+
+const TEXT_MIME_TYPES = [
+    'text/',
+    'application/json',
+    'application/xml',
+    'application/javascript',
+    'application/ecmascript',
+    'application/x-javascript',
+    'application/x-yaml',
+];
+
+const MIME_TYPE_REGEX = /^[a-zA-Z0-9][-a-zA-Z0-9]*\/[a-zA-Z0-9][-a-zA-Z0-9.+]*(?:;\s*charset=[a-zA-Z0-9_-]+)?$/;
+
+export function isTextFile(fileName) {
+    if (!fileName) return false;
+    const name = fileName.toLowerCase();
+    const baseName = name.split('/').pop();
+    if (TEXT_FILE_EXTENSIONS.includes(baseName)) return true;
+    const ext = baseName.split('.').pop();
+    if (ext === baseName) return false;
+    return TEXT_FILE_EXTENSIONS.includes(ext);
+}
+
+export function smartContentType(contentType, fileName) {
+    const base = getMimeTypeBase(contentType);
+    if (base === 'application/octet-stream' && isTextFile(fileName)) {
+        return 'text/plain';
+    }
+    return contentType;
+}
+
+export function validateAndNormalizeContentType(contentType) {
+    if (!contentType || typeof contentType !== 'string') {
+        return 'application/octet-stream';
+    }
+    if (/[\n\r\0]/.test(contentType)) {
+        return 'application/octet-stream';
+    }
+    if (!MIME_TYPE_REGEX.test(contentType.trim())) {
+        return 'application/octet-stream';
+    }
+    return contentType.trim();
+}
+
+export function addCharsetIfNeeded(contentType) {
+    if (!contentType) return contentType;
+    if (/charset\s*=/i.test(contentType)) return contentType;
+    const base = getMimeTypeBase(contentType);
+    const isText = TEXT_MIME_TYPES.some(prefix => base.startsWith(prefix));
+    if (isText) {
+        return `${contentType}; charset=utf-8`;
+    }
+    return contentType;
+}
+
+export function getMimeTypeBase(contentType) {
+    if (!contentType) return '';
+    return contentType.split(';')[0].trim().toLowerCase();
+}
+
+// ==================== 一致性渠道选择 ====================
+
 // 基于uploadId的一致性渠道选择
 export function selectConsistentChannel(channels, uploadId, loadBalanceEnabled) {
     if (!loadBalanceEnabled || !channels || channels.length === 0) {
