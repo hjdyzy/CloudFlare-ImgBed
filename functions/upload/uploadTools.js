@@ -507,9 +507,18 @@ export function isTextFile(fileName) {
 
 export function smartContentType(contentType, fileName) {
     const base = getMimeTypeBase(contentType);
+
+    // 使用智能文本文件类型检测
+    const detectedType = detectTextFileType(fileName, contentType);
+    if (detectedType) {
+        return detectedType;
+    }
+
+    // 如果是 octet-stream 且是文本文件，返回 text/plain
     if (base === 'application/octet-stream' && isTextFile(fileName)) {
         return 'text/plain';
     }
+
     return contentType;
 }
 
@@ -560,4 +569,104 @@ export function selectConsistentChannel(channels, uploadId, loadBalanceEnabled) 
 
     const index = Math.abs(hash) % channels.length;
     return channels[index];
+}
+
+// 文本文件类型检测
+export function detectTextFileType(filename, mimeType) {
+    const ext = filename.toLowerCase().split('.').pop();
+
+    // 常见文本文件扩展名映射
+    const textExtensions = {
+        // 配置文件
+        'conf': 'text/plain',
+        'cnf': 'text/plain',
+        'config': 'text/plain',
+        'ini': 'text/plain',
+        'cfg': 'text/plain',
+        'properties': 'text/plain',
+        'env': 'text/plain',
+
+        // 代码文件
+        'js': 'text/javascript',
+        'mjs': 'text/javascript',
+        'cjs': 'text/javascript',
+        'ts': 'text/typescript',
+        'jsx': 'text/jsx',
+        'tsx': 'text/tsx',
+        'py': 'text/x-python',
+        'java': 'text/x-java',
+        'c': 'text/x-c',
+        'cpp': 'text/x-c++',
+        'h': 'text/x-c',
+        'hpp': 'text/x-c++',
+        'cs': 'text/x-csharp',
+        'php': 'text/x-php',
+        'rb': 'text/x-ruby',
+        'go': 'text/x-go',
+        'rs': 'text/x-rust',
+        'swift': 'text/x-swift',
+        'kt': 'text/x-kotlin',
+        'scala': 'text/x-scala',
+        'sh': 'text/x-sh',
+        'bash': 'text/x-sh',
+        'zsh': 'text/x-sh',
+        'fish': 'text/x-sh',
+        'ps1': 'text/x-powershell',
+        'bat': 'text/x-bat',
+        'cmd': 'text/x-bat',
+
+        // 标记语言
+        'html': 'text/html',
+        'htm': 'text/html',
+        'xml': 'text/xml',
+        'svg': 'image/svg+xml',
+        'md': 'text/markdown',
+        'markdown': 'text/markdown',
+        'rst': 'text/x-rst',
+        'tex': 'text/x-tex',
+
+        // 样式和数据
+        'css': 'text/css',
+        'scss': 'text/x-scss',
+        'sass': 'text/x-sass',
+        'less': 'text/x-less',
+        'json': 'application/json',
+        'jsonc': 'application/json',
+        'json5': 'application/json',
+        'yaml': 'text/yaml',
+        'yml': 'text/yaml',
+        'toml': 'text/x-toml',
+        'csv': 'text/csv',
+        'tsv': 'text/tab-separated-values',
+
+        // 文档
+        'txt': 'text/plain',
+        'text': 'text/plain',
+        'log': 'text/plain',
+        'rtf': 'text/rtf',
+
+        // 其他
+        'sql': 'text/x-sql',
+        'dockerfile': 'text/x-dockerfile',
+        'makefile': 'text/x-makefile',
+        'gitignore': 'text/plain',
+        'gitattributes': 'text/plain',
+        'editorconfig': 'text/plain',
+        'htaccess': 'text/plain',
+        'vue': 'text/x-vue',
+        'svelte': 'text/x-svelte',
+    };
+
+    // 如果扩展名在映射表中，返回对应的 MIME 类型
+    if (textExtensions[ext]) {
+        return textExtensions[ext];
+    }
+
+    // 如果原始 MIME 类型已经是文本类型，保持不变
+    if (mimeType && mimeType.startsWith('text/')) {
+        return mimeType;
+    }
+
+    // 默认返回 null，表示不是文本文件
+    return null;
 }

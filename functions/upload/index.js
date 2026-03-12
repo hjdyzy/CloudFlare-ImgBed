@@ -3,7 +3,7 @@ import { fetchUploadConfig, fetchSecurityConfig } from "../utils/sysConfig";
 import {
     createResponse, getUploadIp, getIPAddress, resolveFileExt,
     moderateContent, purgeCDNCache, isBlockedUploadIp, buildUniqueFileId, endUpload, getImageDimensions,
-    sanitizeUploadFolder, smartContentType, addCharsetIfNeeded, validateAndNormalizeContentType, getMimeTypeBase
+    sanitizeUploadFolder, smartContentType, addCharsetIfNeeded, validateAndNormalizeContentType, getMimeTypeBase, detectTextFileType
 } from "./uploadTools";
 import { initializeChunkedUpload, handleChunkUpload, uploadLargeFileToTelegram, handleCleanupRequest } from "./chunkUpload";
 import { handleChunkMerge } from "./chunkMerge";
