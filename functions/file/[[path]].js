@@ -54,7 +54,7 @@ export async function onRequest(context) {  // Contents of context object
     }
 
     if (!imgRecord) {
-        return new Response('Error: Image Not Found', { status: 404 });
+        return new Response(`fileId="${fileId}" params.path="${JSON.stringify(params.path)}"`, { status: 404 });
     }
 
     // 如果metadata不存在，只可能是之前未设置KV，且存储在Telegraph上的图片
