@@ -48,16 +48,13 @@ export async function onRequest(context) {  // Contents of context object
     const db = getDatabase(env);
     let imgRecord = await db.getWithMetadata(fileId);
 
-    // 如果未找到记录，且原始请求路径以 / 结尾（目录访问），尝试查找 index.html
-    if (!imgRecord && url.pathname.endsWith('/')) {
-        const indexKey = fileId + '/index.html';
-        console.log('[dir-index] fileId:', fileId, '| pathname:', url.pathname, '| trying:', indexKey);
-        imgRecord = await db.getWithMetadata(indexKey);
+    // 如果未找到记录，尝试查找目录下的 index.html（支持有无末尾斜杠两种情况）
+    if (!imgRecord) {
+        imgRecord = await db.getWithMetadata(fileId + '/index.html');
     }
 
     if (!imgRecord) {
-        const debugInfo = `fileId="${fileId}" | pathname="${url.pathname}" | endsWith="${url.pathname.endsWith('/')}"`;
-        return new Response('Error: Image Not Found\n' + debugInfo, { status: 404 });
+        return new Response('Error: Image Not Found', { status: 404 });
     }
 
     // 如果metadata不存在，只可能是之前未设置KV，且存储在Telegraph上的图片
