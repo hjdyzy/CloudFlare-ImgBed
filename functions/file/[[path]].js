@@ -48,9 +48,9 @@ export async function onRequest(context) {  // Contents of context object
     const db = getDatabase(env);
     let imgRecord = await db.getWithMetadata(fileId);
 
-    // 如果未找到记录，且路径以 / 结尾（目录访问），尝试查找 index.html
-    if (!imgRecord && fileId.endsWith('/')) {
-        imgRecord = await db.getWithMetadata(fileId + 'index.html');
+    // 如果未找到记录，且原始请求路径以 / 结尾（目录访问），尝试查找 index.html
+    if (!imgRecord && url.pathname.endsWith('/')) {
+        imgRecord = await db.getWithMetadata(fileId + '/index.html');
     }
 
     if (!imgRecord) {
