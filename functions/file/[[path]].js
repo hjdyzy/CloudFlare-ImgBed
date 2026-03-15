@@ -56,8 +56,8 @@ export async function onRequest(context) {  // Contents of context object
     }
 
     if (!imgRecord) {
-        console.log('[dir-index] not found, fileId:', fileId, '| pathname:', url.pathname);
-        return new Response('Error: Image Not Found', { status: 404 });
+        const debugInfo = `fileId="${fileId}" | pathname="${url.pathname}" | endsWith="${url.pathname.endsWith('/')}"`;
+        return new Response('Error: Image Not Found\n' + debugInfo, { status: 404 });
     }
 
     // 如果metadata不存在，只可能是之前未设置KV，且存储在Telegraph上的图片
