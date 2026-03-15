@@ -46,15 +46,13 @@ export async function onRequest(context) {  // Contents of context object
 
     // 从数据库中获取图片记录
     const db = getDatabase(env);
-    let imgRecord = await db.getWithMetadata(fileId);
 
-    // 如果未找到记录，尝试查找目录下的 index.html（支持有无末尾斜杠两种情况）
-    if (!imgRecord) {
-        imgRecord = await db.getWithMetadata(fileId + '/index.html');
-    }
+    // 优先检查是否为目录访问：若 fileId/index.html 存在则直接使用
+    const indexRecord = await db.getWithMetadata(fileId + '/index.html');
+    let imgRecord = indexRecord || await db.getWithMetadata(fileId);
 
     if (!imgRecord) {
-        return new Response(`fileId="${fileId}" params.path="${JSON.stringify(params.path)}"`, { status: 404 });
+        return new Response('Error: Image Not Found', { status: 404 });
     }
 
     // 如果metadata不存在，只可能是之前未设置KV，且存储在Telegraph上的图片
