@@ -50,10 +50,13 @@ export async function onRequest(context) {  // Contents of context object
 
     // 如果未找到记录，且原始请求路径以 / 结尾（目录访问），尝试查找 index.html
     if (!imgRecord && url.pathname.endsWith('/')) {
-        imgRecord = await db.getWithMetadata(fileId + '/index.html');
+        const indexKey = fileId + '/index.html';
+        console.log('[dir-index] fileId:', fileId, '| pathname:', url.pathname, '| trying:', indexKey);
+        imgRecord = await db.getWithMetadata(indexKey);
     }
 
     if (!imgRecord) {
+        console.log('[dir-index] not found, fileId:', fileId, '| pathname:', url.pathname);
         return new Response('Error: Image Not Found', { status: 404 });
     }
 
