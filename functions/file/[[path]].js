@@ -49,9 +49,10 @@ export async function onRequest(context) {  // Contents of context object
 
     // 优先检查是否为目录访问：若 fileId/index.html 存在则直接使用
     const indexRecord = await db.getWithMetadata(fileId + '/index.html');
-    let imgRecord = indexRecord || await db.getWithMetadata(fileId);
+    const indexExists = indexRecord && indexRecord.value !== null && indexRecord.metadata !== null;
+    let imgRecord = indexExists ? indexRecord : await db.getWithMetadata(fileId);
 
-    if (!imgRecord) {
+    if (!imgRecord || (imgRecord.value === null && imgRecord.metadata === null)) {
         return new Response('Error: Image Not Found', { status: 404 });
     }
 
