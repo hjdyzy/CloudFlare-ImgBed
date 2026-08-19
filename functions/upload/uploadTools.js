@@ -31,35 +31,82 @@ export function generateShortId(length = 8) {
     return result;
 }
 
+const UNKNOWN_IP_ADDRESS = '未知';
+
 // 获取IP地址
-export async function getIPAddress(ip) {
-    let address = '未知';
+export async function getIPAddress(env, ip, securityConfig = null) {
+    if (!env || !ip) return UNKNOWN_IP_ADDRESS;
+
     try {
-        const ipInfo = await fetch(`https://apimobile.meituan.com/locate/v2/ip/loc?rgeo=true&ip=${ip}`);
-        const ipData = await ipInfo.json();
+        const config = securityConfig || await fetchSecurityConfig(env);
+        const ipQuery = config?.upload?.ipQuery;
 
-        if (ipInfo.ok && ipData.data) {
-            const lng = ipData.data?.lng || 0;
-            const lat = ipData.data?.lat || 0;
-
-            // 读取具体地址
-            const addressInfo = await fetch(`https://apimobile.meituan.com/group/v1/city/latlng/${lat},${lng}?tag=0`);
-            const addressData = await addressInfo.json();
-
-            if (addressInfo.ok && addressData.data) {
-                // 根据各字段是否存在，拼接地址
-                address = [
-                    addressData.data.detail,
-                    addressData.data.city,
-                    addressData.data.province,
-                    addressData.data.country
-                ].filter(Boolean).join(', ');
-            }
+        if (!ipQuery?.enabled || ipQuery.channel !== 'customApi') {
+            return UNKNOWN_IP_ADDRESS;
         }
+
+        const customApi = ipQuery.customApi || {};
+        if (!customApi.url) {
+            return UNKNOWN_IP_ADDRESS;
+        }
+
+        const responseFields = Array.isArray(customApi.responseFields)
+            ? customApi.responseFields
+                .map(field => typeof field === 'string' ? field : field?.path || '')
+                .filter(Boolean)
+            : [];
+        if (responseFields.length === 0) {
+            return UNKNOWN_IP_ADDRESS;
+        }
+
+        const replaceIpPlaceholder = value => String(value ?? '').replace(/\{ip\}/g, ip);
+        const queryUrl = new URL(replaceIpPlaceholder(customApi.url));
+        const paramList = Array.isArray(customApi.params) ? customApi.params : [];
+        for (const param of paramList) {
+            const key = replaceIpPlaceholder(param?.key || '');
+            if (!key) continue;
+            queryUrl.searchParams.append(key, replaceIpPlaceholder(param?.value || ''));
+        }
+
+        const response = await fetch(queryUrl.toString());
+        if (!response.ok) {
+            return UNKNOWN_IP_ADDRESS;
+        }
+
+        const data = JSON.parse((await response.text()).trim());
+        const formatValue = value => {
+            if (Array.isArray(value)) {
+                return value.map(formatValue).filter(Boolean).join(', ');
+            }
+            if (typeof value === 'object' && value !== null) {
+                return JSON.stringify(value);
+            }
+            return String(value ?? '').trim();
+        };
+
+        const address = responseFields
+            .map(path => {
+                const value = String(path)
+                    .replace(/\[(\d+)\]/g, '.$1')
+                    .split('.')
+                    .map(segment => segment.trim())
+                    .filter(Boolean)
+                    .reduce((current, segment) => {
+                        if (current === undefined || current === null) return undefined;
+                        return current[segment];
+                    }, data);
+
+                if (value === undefined || value === null || value === '') return '';
+                return formatValue(value);
+            })
+            .filter(Boolean)
+            .join('，');
+
+        return address || UNKNOWN_IP_ADDRESS;
     } catch (error) {
         console.error('Error fetching IP address:', error);
+        return UNKNOWN_IP_ADDRESS;
     }
-    return address;
 }
 
 // 处理文件名中的特殊字符
@@ -465,94 +512,6 @@ export async function buildUniqueFileId(context, fileName, fileType = 'applicati
     }
 }
 
-// ==================== Content-Type 智能处理 ====================
-
-const TEXT_FILE_EXTENSIONS = [
-    'txt', 'log', 'md', 'markdown', 'rst', 'csv', 'tsv',
-    'json', 'xml', 'yaml', 'yml', 'toml', 'ini', 'cfg', 'conf', 'cnf',
-    'html', 'htm', 'css', 'scss', 'sass', 'less',
-    'js', 'jsx', 'mjs', 'cjs', 'ts', 'tsx',
-    'py', 'pyw', 'rb', 'php', 'java', 'kt', 'kts', 'scala',
-    'c', 'h', 'cpp', 'hpp', 'cc', 'cxx', 'cs', 'go', 'rs', 'swift',
-    'sh', 'bash', 'zsh', 'fish', 'bat', 'cmd', 'ps1', 'psm1',
-    'sql', 'graphql', 'gql',
-    'vue', 'svelte', 'astro',
-    'dockerfile', 'makefile', 'rakefile',
-    'env', 'gitignore', 'dockerignore', 'editorconfig',
-    'properties', 'gradle', 'sbt',
-    'r', 'R', 'lua', 'pl', 'pm', 'perl',
-];
-
-const TEXT_MIME_TYPES = [
-    'text/',
-    'application/json',
-    'application/xml',
-    'application/javascript',
-    'application/ecmascript',
-    'application/x-javascript',
-    'application/x-yaml',
-];
-
-const MIME_TYPE_REGEX = /^[a-zA-Z0-9][-a-zA-Z0-9]*\/[a-zA-Z0-9][-a-zA-Z0-9.+]*(?:;\s*charset=[a-zA-Z0-9_-]+)?$/;
-
-export function isTextFile(fileName) {
-    if (!fileName) return false;
-    const name = fileName.toLowerCase();
-    const baseName = name.split('/').pop();
-    if (TEXT_FILE_EXTENSIONS.includes(baseName)) return true;
-    const ext = baseName.split('.').pop();
-    if (ext === baseName) return false;
-    return TEXT_FILE_EXTENSIONS.includes(ext);
-}
-
-export function smartContentType(contentType, fileName) {
-    const base = getMimeTypeBase(contentType);
-
-    // 使用智能文本文件类型检测
-    const detectedType = detectTextFileType(fileName, contentType);
-    if (detectedType) {
-        return detectedType;
-    }
-
-    // 如果是 octet-stream 且是文本文件，返回 text/plain
-    if (base === 'application/octet-stream' && isTextFile(fileName)) {
-        return 'text/plain';
-    }
-
-    return contentType;
-}
-
-export function validateAndNormalizeContentType(contentType) {
-    if (!contentType || typeof contentType !== 'string') {
-        return 'application/octet-stream';
-    }
-    if (/[\n\r\0]/.test(contentType)) {
-        return 'application/octet-stream';
-    }
-    if (!MIME_TYPE_REGEX.test(contentType.trim())) {
-        return 'application/octet-stream';
-    }
-    return contentType.trim();
-}
-
-export function addCharsetIfNeeded(contentType) {
-    if (!contentType) return contentType;
-    if (/charset\s*=/i.test(contentType)) return contentType;
-    const base = getMimeTypeBase(contentType);
-    const isText = TEXT_MIME_TYPES.some(prefix => base.startsWith(prefix));
-    if (isText) {
-        return `${contentType}; charset=utf-8`;
-    }
-    return contentType;
-}
-
-export function getMimeTypeBase(contentType) {
-    if (!contentType) return '';
-    return contentType.split(';')[0].trim().toLowerCase();
-}
-
-// ==================== 一致性渠道选择 ====================
-
 // 基于uploadId的一致性渠道选择
 export function selectConsistentChannel(channels, uploadId, loadBalanceEnabled) {
     if (!loadBalanceEnabled || !channels || channels.length === 0) {
@@ -569,104 +528,4 @@ export function selectConsistentChannel(channels, uploadId, loadBalanceEnabled) 
 
     const index = Math.abs(hash) % channels.length;
     return channels[index];
-}
-
-// 文本文件类型检测
-export function detectTextFileType(filename, mimeType) {
-    const ext = filename.toLowerCase().split('.').pop();
-
-    // 常见文本文件扩展名映射
-    const textExtensions = {
-        // 配置文件
-        'conf': 'text/plain',
-        'cnf': 'text/plain',
-        'config': 'text/plain',
-        'ini': 'text/plain',
-        'cfg': 'text/plain',
-        'properties': 'text/plain',
-        'env': 'text/plain',
-
-        // 代码文件
-        'js': 'text/javascript',
-        'mjs': 'text/javascript',
-        'cjs': 'text/javascript',
-        'ts': 'text/typescript',
-        'jsx': 'text/jsx',
-        'tsx': 'text/tsx',
-        'py': 'text/x-python',
-        'java': 'text/x-java',
-        'c': 'text/x-c',
-        'cpp': 'text/x-c++',
-        'h': 'text/x-c',
-        'hpp': 'text/x-c++',
-        'cs': 'text/x-csharp',
-        'php': 'text/x-php',
-        'rb': 'text/x-ruby',
-        'go': 'text/x-go',
-        'rs': 'text/x-rust',
-        'swift': 'text/x-swift',
-        'kt': 'text/x-kotlin',
-        'scala': 'text/x-scala',
-        'sh': 'text/x-sh',
-        'bash': 'text/x-sh',
-        'zsh': 'text/x-sh',
-        'fish': 'text/x-sh',
-        'ps1': 'text/x-powershell',
-        'bat': 'text/x-bat',
-        'cmd': 'text/x-bat',
-
-        // 标记语言
-        'html': 'text/html',
-        'htm': 'text/html',
-        'xml': 'text/xml',
-        'svg': 'image/svg+xml',
-        'md': 'text/markdown',
-        'markdown': 'text/markdown',
-        'rst': 'text/x-rst',
-        'tex': 'text/x-tex',
-
-        // 样式和数据
-        'css': 'text/css',
-        'scss': 'text/x-scss',
-        'sass': 'text/x-sass',
-        'less': 'text/x-less',
-        'json': 'application/json',
-        'jsonc': 'application/json',
-        'json5': 'application/json',
-        'yaml': 'text/yaml',
-        'yml': 'text/yaml',
-        'toml': 'text/x-toml',
-        'csv': 'text/csv',
-        'tsv': 'text/tab-separated-values',
-
-        // 文档
-        'txt': 'text/plain',
-        'text': 'text/plain',
-        'log': 'text/plain',
-        'rtf': 'text/rtf',
-
-        // 其他
-        'sql': 'text/x-sql',
-        'dockerfile': 'text/x-dockerfile',
-        'makefile': 'text/x-makefile',
-        'gitignore': 'text/plain',
-        'gitattributes': 'text/plain',
-        'editorconfig': 'text/plain',
-        'htaccess': 'text/plain',
-        'vue': 'text/x-vue',
-        'svelte': 'text/x-svelte',
-    };
-
-    // 如果扩展名在映射表中，返回对应的 MIME 类型
-    if (textExtensions[ext]) {
-        return textExtensions[ext];
-    }
-
-    // 如果原始 MIME 类型已经是文本类型，保持不变
-    if (mimeType && mimeType.startsWith('text/')) {
-        return mimeType;
-    }
-
-    // 默认返回 null，表示不是文本文件
-    return null;
 }

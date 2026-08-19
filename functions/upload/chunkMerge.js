@@ -3,6 +3,7 @@ import { createResponse, getUploadIp, getIPAddress, selectConsistentChannel, bui
 import { retryFailedChunks, cleanupFailedMultipartUploads, checkChunkUploadStatuses, cleanupChunkData, cleanupUploadSession } from './chunkUpload';
 import { S3Client, CompleteMultipartUploadCommand } from "@aws-sdk/client-s3";
 import { getDatabase } from '../utils/databaseAdapter.js';
+import { fetchPageConfig } from '../utils/sysConfig.js';
 
 // 处理分块合并
 export async function handleChunkMerge(context) {
@@ -46,6 +47,9 @@ export async function handleChunkMerge(context) {
 
         // 使用会话中的上传渠道，或者从URL参数获取
         uploadChannel = url.searchParams.get('uploadChannel') || sessionInfo.uploadChannel || 'telegram';
+        if (uploadChannel === 'webdav') {
+            return createResponse('Error: WebDAV channel does not support chunked uploads. Please use non-chunked upload within your Cloudflare request body limit.', { status: 400 });
+        }
 
         // 获取指定的渠道名称（优先URL参数，其次会话信息）
         const channelName = url.searchParams.get('channelName') || sessionInfo.channelName || '';
@@ -109,6 +113,18 @@ async function startMerge(context, uploadId, totalChunks, originalFileName, orig
             // 清理上传会话
             await cleanupUploadSession(env, uploadId);
 
+            // 构建公开访问链接（使用 urlPrefix 配置）
+            if (result.result && result.result.length > 0) {
+                const src = result.result[0].src;
+                const fileName = src.startsWith('/file/') ? src.slice(6) : src.split('/file/').pop();
+                const pageConfig = await fetchPageConfig(env);
+                const urlPrefixConfig = pageConfig.config?.find(c => c.id === 'urlPrefix');
+                const urlPrefix = urlPrefixConfig?.value || '';
+                if (urlPrefix) {
+                    result.result[0].publicUrl = `${urlPrefix.replace(/\/+$/, '')}/${fileName}`;
+                }
+            }
+
             return createResponse(JSON.stringify(result.result), {
                 status: 200,
                 headers: { 'Content-Type': 'application/json' }
@@ -149,7 +165,7 @@ async function handleChannelBasedMerge(context, uploadId, totalChunks, originalF
             FileType: originalFileType,
             FileSize: '0', // 会在最终合并后更新
             UploadIP: uploadIp,
-            UploadAddress: await getIPAddress(uploadIp),
+            UploadAddress: await getIPAddress(env, uploadIp, context.securityConfig),
             ListType: "None",
             TimeStamp: Date.now(),
             Label: "None",
@@ -374,19 +390,6 @@ async function mergeS3ChunksInfo(context, uploadId, completedChunks, metadata) {
         metadata.ChannelName = s3Channel.name;
         metadata.FileSize = (totalSize / 1024 / 1024).toFixed(2);
         metadata.FileSizeBytes = totalSize;
-
-        const s3ServerDomain = endpoint.replace(/https?:\/\//, "");
-        if (pathStyle) {
-            metadata.S3Location = `https://${s3ServerDomain}/${bucketName}/${finalFileId}`;
-        } else {
-            metadata.S3Location = `https://${bucketName}.${s3ServerDomain}/${finalFileId}`;
-        }
-        metadata.S3Endpoint = endpoint;
-        metadata.S3PathStyle = pathStyle;
-        metadata.S3AccessKeyId = accessKeyId;
-        metadata.S3SecretAccessKey = secretAccessKey;
-        metadata.S3Region = region || "auto";
-        metadata.S3BucketName = bucketName;
         metadata.S3FileKey = finalFileId;
 
         // 清理multipart info
@@ -437,9 +440,6 @@ async function mergeTelegramChunksInfo(context, uploadId, completedChunks, metad
 
         console.log(`Merging Telegram chunks for uploadId: ${uploadId}, selected channel: ${tgChannel.name || 'default'}`);
 
-        const tgBotToken = tgChannel.botToken;
-        const tgChatId = tgChannel.chatId;
-
         // 按顺序排列分块
         const sortedChunks = completedChunks.sort((a, b) => a.index - b.index);
 
@@ -460,9 +460,6 @@ async function mergeTelegramChunksInfo(context, uploadId, completedChunks, metad
         // 更新metadata
         metadata.Channel = "TelegramNew";
         metadata.ChannelName = tgChannel.name;
-        metadata.TgChatId = tgChatId;
-        metadata.TgBotToken = tgBotToken;
-        metadata.TgProxyUrl = tgChannel.proxyUrl || '';
         metadata.IsChunked = true;
         metadata.TotalChunks = completedChunks.length;
         metadata.FileSize = (totalSize / 1024 / 1024).toFixed(2);
@@ -516,9 +513,6 @@ async function mergeDiscordChunksInfo(context, uploadId, completedChunks, metada
 
         console.log(`Merging Discord chunks for uploadId: ${uploadId}, selected channel: ${discordChannel.name || 'default'}`);
 
-        const botToken = discordChannel.botToken;
-        const channelId = discordChannel.channelId;
-
         // 按顺序排列分块
         const sortedChunks = completedChunks.sort((a, b) => a.index - b.index);
 
@@ -540,9 +534,6 @@ async function mergeDiscordChunksInfo(context, uploadId, completedChunks, metada
         // 更新metadata
         metadata.Channel = "Discord";
         metadata.ChannelName = discordChannel.name;
-        metadata.DiscordChannelId = channelId;
-        metadata.DiscordBotToken = botToken;
-        metadata.DiscordProxyUrl = discordChannel.proxyUrl || '';
         metadata.IsChunked = true;
         metadata.TotalChunks = completedChunks.length;
         metadata.FileSize = (totalSize / 1024 / 1024).toFixed(2);

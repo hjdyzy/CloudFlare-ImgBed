@@ -1,8 +1,11 @@
-// 获取上传渠道列表 API
+/**
+ * 上传渠道列表 API
+ * 负责在鉴权后返回当前可用或全部上传渠道的名称与类型
+ */
 import { fetchUploadConfig } from '../utils/sysConfig.js';
 import { getUploadConfig } from './manage/sysConfig/upload.js';
 import { getDatabase } from '../utils/databaseAdapter.js';
-import { dualAuthCheck } from '../utils/dualAuth.js';
+import { dualAuthCheck } from '../utils/auth/dualAuth.js';
 
 export async function onRequest(context) {
     const { request, env } = context;
@@ -55,6 +58,10 @@ export async function onRequest(context) {
             huggingface: uploadConfig.huggingface.channels.map(ch => ({
                 name: ch.name,
                 type: 'HuggingFace'
+            })),
+            webdav: uploadConfig.webdav.channels.map(ch => ({
+                name: ch.name,
+                type: 'WebDAV'
             }))
         };
 

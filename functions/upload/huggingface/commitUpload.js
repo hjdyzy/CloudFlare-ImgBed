@@ -4,11 +4,11 @@
  * 在前端直接上传文件到 S3 后，调用此 API 提交 LFS 文件引用
  */
 
-import { HuggingFaceAPI } from '../../utils/huggingfaceAPI.js';
-import { fetchUploadConfig } from '../../utils/sysConfig.js';
+import { HuggingFaceAPI } from '../../utils/storage/huggingfaceAPI.js';
+import { fetchPageConfig, fetchUploadConfig } from '../../utils/sysConfig.js';
 import { getDatabase } from '../../utils/databaseAdapter.js';
-import { moderateContent, endUpload, getUploadIp, getIPAddress, sanitizeUploadFolder } from '../uploadTools.js';
-import { userAuthCheck, UnauthorizedResponse } from '../../utils/userAuth.js';
+import { moderateContent, endUpload, getUploadIp, getIPAddress, sanitizeUploadFolder, createResponse } from '../uploadTools.js';
+import { userAuthCheck, UnauthorizedResponse } from '../../utils/auth/userAuth.js';
 
 export async function onRequestPost(context) {
     const { request, env, waitUntil } = context;
@@ -22,10 +22,10 @@ export async function onRequestPost(context) {
         }
 
         const body = await request.json();
-        const { fullId, filePath, sha256, fileSize, fileName, fileType, channelName, multipartParts } = body;
+        const { fullId, filePath, sha256, fileSize, fileName, fileType, channelName } = body;
 
         if (!fullId || !filePath || !sha256 || !fileSize) {
-            return new Response(JSON.stringify({
+            return createResponse(JSON.stringify({
                 error: 'Missing required fields: fullId, filePath, sha256, fileSize'
             }), {
                 status: 400,
@@ -36,7 +36,7 @@ export async function onRequestPost(context) {
         // 路径安全处理：使用统一的路径安全函数
         const sanitizedFullId = sanitizeUploadFolder(fullId);
         if (sanitizedFullId !== fullId) {
-            return new Response(JSON.stringify({
+            return createResponse(JSON.stringify({
                 error: 'Invalid fullId: contains illegal path characters'
             }), {
                 status: 400,
@@ -49,7 +49,7 @@ export async function onRequestPost(context) {
         const hfSettings = uploadConfig.huggingface;
 
         if (!hfSettings || !hfSettings.channels || hfSettings.channels.length === 0) {
-            return new Response(JSON.stringify({ error: 'No HuggingFace channel configured' }), {
+            return createResponse(JSON.stringify({ error: 'No HuggingFace channel configured' }), {
                 status: 400,
                 headers: { 'Content-Type': 'application/json' }
             });
@@ -65,18 +65,13 @@ export async function onRequestPost(context) {
         }
 
         if (!hfChannel || !hfChannel.token || !hfChannel.repo) {
-            return new Response(JSON.stringify({ error: 'HuggingFace channel not properly configured' }), {
+            return createResponse(JSON.stringify({ error: 'HuggingFace channel not properly configured' }), {
                 status: 400,
                 headers: { 'Content-Type': 'application/json' }
             });
         }
 
         const huggingfaceAPI = new HuggingFaceAPI(hfChannel.token, hfChannel.repo, hfChannel.isPrivate || false);
-
-        // 如果有 multipart parts，需要先完成 multipart 上传
-        if (multipartParts && multipartParts.length > 0) {
-            console.log('Completing multipart upload...');
-        }
 
         // 提交 LFS 文件引用
         console.log('Committing LFS file...');
@@ -97,7 +92,7 @@ export async function onRequestPost(context) {
 
         // 获取上传IP和地址
         const uploadIp = getUploadIp(request) || '';
-        const uploadAddress = await getIPAddress(uploadIp);
+        const uploadAddress = await getIPAddress(env, uploadIp);
 
         // 构建 metadata
         const metadata = {
@@ -110,11 +105,7 @@ export async function onRequestPost(context) {
             UploadIP: uploadIp,
             UploadAddress: uploadAddress,
             ListType: "None",
-            HfRepo: hfChannel.repo,
             HfFilePath: filePath,
-            HfToken: hfChannel.token,
-            HfIsPrivate: hfChannel.isPrivate || false,
-            HfFileUrl: fileUrl,
             TimeStamp: Date.now(),
             Label: "None",
             Directory: normalizedDirectory,
@@ -145,19 +136,29 @@ export async function onRequestPost(context) {
 
         // 返回成功响应
         const returnLink = `/file/${fullId}`;
-        return new Response(JSON.stringify({
+        const responseBody = {
             success: true,
             src: returnLink,
             fileUrl,
             fullId
-        }), {
+        };
+
+        // 构建公开访问链接（使用 urlPrefix 配置）
+        const pageConfig = await fetchPageConfig(env);
+        const urlPrefixConfig = pageConfig.config?.find(c => c.id === 'urlPrefix');
+        const urlPrefix = urlPrefixConfig?.value || '';
+        if (urlPrefix) {
+            responseBody.publicUrl = `${urlPrefix.replace(/\/+$/, '')}/${fullId}`;
+        }
+
+        return createResponse(JSON.stringify(responseBody), {
             status: 200,
             headers: { 'Content-Type': 'application/json' }
         });
 
     } catch (error) {
         console.error('commitUpload error:', error.message);
-        return new Response(JSON.stringify({ error: error.message }), {
+        return createResponse(JSON.stringify({ error: error.message }), {
             status: 500,
             headers: { 'Content-Type': 'application/json' }
         });

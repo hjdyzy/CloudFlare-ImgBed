@@ -1,15 +1,19 @@
-import { userAuthCheck, UnauthorizedResponse } from "../utils/userAuth";
-import { fetchUploadConfig, fetchSecurityConfig } from "../utils/sysConfig";
+import { userAuthCheck, UnauthorizedResponse } from "../utils/auth/userAuth";
+import { fetchUploadConfig, fetchSecurityConfig, fetchPageConfig } from "../utils/sysConfig";
 import {
     createResponse, getUploadIp, getIPAddress, resolveFileExt,
     moderateContent, purgeCDNCache, isBlockedUploadIp, buildUniqueFileId, endUpload, getImageDimensions,
-    sanitizeUploadFolder, smartContentType, addCharsetIfNeeded, validateAndNormalizeContentType, getMimeTypeBase, detectTextFileType
+    sanitizeUploadFolder
 } from "./uploadTools";
+import {
+    smartContentType, addCharsetIfNeeded, validateAndNormalizeContentType
+} from "../utils/textFileDetector";
 import { initializeChunkedUpload, handleChunkUpload, uploadLargeFileToTelegram, handleCleanupRequest } from "./chunkUpload";
 import { handleChunkMerge } from "./chunkMerge";
-import { TelegramAPI } from "../utils/telegramAPI";
-import { DiscordAPI } from "../utils/discordAPI";
-import { HuggingFaceAPI } from "../utils/huggingfaceAPI";
+import { TelegramAPI } from "../utils/storage/telegramAPI";
+import { DiscordAPI } from "../utils/storage/discordAPI";
+import { HuggingFaceAPI } from "../utils/storage/huggingfaceAPI";
+import { WebDAVAPI } from "../utils/storage/webdavAPI";
 import { S3Client, PutObjectCommand } from "@aws-sdk/client-s3";
 import { getDatabase } from '../utils/databaseAdapter.js';
 
@@ -90,7 +94,7 @@ async function processFileUpload(context, formdata = null) {
 
     // 获取IP地址
     const uploadIp = getUploadIp(request);
-    const ipAddress = await getIPAddress(uploadIp);
+    const ipAddress = await getIPAddress(context.env, uploadIp, context.securityConfig);
 
     // 获取上传文件夹路径
     let uploadFolder = url.searchParams.get('uploadFolder') || '';
@@ -115,6 +119,9 @@ async function processFileUpload(context, formdata = null) {
         case 'huggingface':
             uploadChannel = 'HuggingFace';
             break;
+        case 'webdav':
+            uploadChannel = 'WebDAV';
+            break;
         case 'external':
             uploadChannel = 'External';
             break;
@@ -129,16 +136,12 @@ async function processFileUpload(context, formdata = null) {
     // 获取文件信息
     const time = new Date().getTime();
     const file = formdata.get('file');
-    let fileType = formdata.get('customContentType') || file.type;
-    // 验证自定义 Content-Type（防注入）
-    if (formdata.get('customContentType')) {
+    const customContentType = formdata.get('customContentType');
+    let fileType = customContentType || file.type;
+    if (customContentType) {
         fileType = validateAndNormalizeContentType(fileType);
     }
-    // 智能修正：octet-stream + 文本扩展名 → text/plain
-    fileType = smartContentType(fileType, file.name);
-    // 文本类型自动添加 charset=utf-8
-    fileType = addCharsetIfNeeded(fileType);
-
+    fileType = addCharsetIfNeeded(smartContentType(fileType, file.name));
     let fileName = file.name;
     const fileSizeBytes = file.size; // 文件大小，单位字节
     const fileSize = (fileSizeBytes / 1024 / 1024).toFixed(2); // 文件大小，单位MB
@@ -205,6 +208,12 @@ async function processFileUpload(context, formdata = null) {
         returnLink = `/file/${fullId}`;
     }
 
+    // 构建公开访问链接（使用 urlPrefix 配置）
+    const pageConfig = await fetchPageConfig(context.env);
+    const urlPrefixConfig = pageConfig.config?.find(c => c.id === 'urlPrefix');
+    const urlPrefix = urlPrefixConfig?.value || '';
+    context.publicUrl = urlPrefix ? `${urlPrefix.replace(/\/+$/, '')}/${fullId}` : '';
+
     /* ====================================不同渠道上传======================================= */
     // 出错是否切换渠道自动重试，默认开启
     const autoRetry = url.searchParams.get('autoRetry') === 'false' ? false : true;
@@ -243,6 +252,14 @@ async function processFileUpload(context, formdata = null) {
         } else {
             err = await res.text();
         }
+    } else if (uploadChannel === 'WebDAV') {
+        // ---------------------WebDAV 渠道------------------
+        const res = await uploadFileToWebDAV(context, fullId, metadata, returnLink);
+        if (res.status === 200 || !autoRetry) {
+            return res;
+        } else {
+            err = await res.text();
+        }
     } else if (uploadChannel === 'External') {
         // --------------------外链渠道----------------------
         const res = await uploadFileToExternal(context, fullId, metadata, returnLink);
@@ -260,6 +277,19 @@ async function processFileUpload(context, formdata = null) {
     // 上传失败，开始自动切换渠道重试
     const res = await tryRetry(err, context, uploadChannel, fullId, metadata, fileExt, fileName, fileType, returnLink);
     return res;
+}
+
+// 构建上传成功响应，自动附带 publicUrl（如果已配置）
+function buildUploadResponse(context, returnLink) {
+    const result = { src: returnLink };
+    if (context.publicUrl) {
+        result.publicUrl = context.publicUrl;
+    }
+    return createResponse(JSON.stringify([result]), {
+        headers: {
+            'Content-Type': 'application/json',
+        },
+    });
 }
 
 // 上传到Cloudflare R2
@@ -314,15 +344,7 @@ async function uploadFileToCloudflareR2(context, fullId, metadata, returnLink) {
     waitUntil(endUpload(context, fullId, metadata));
 
     // 成功上传，将文件ID返回给客户端
-    return createResponse(
-        JSON.stringify([{ 'src': `${returnLink}` }]),
-        {
-            status: 200,
-            headers: {
-                'Content-Type': 'application/json',
-            }
-        }
-    );
+    return buildUploadResponse(context, returnLink);
 }
 
 
@@ -351,7 +373,7 @@ async function uploadFileToS3(context, fullId, metadata, returnLink) {
         return createResponse('Error: No S3 channel provided', { status: 400 });
     }
 
-    const { endpoint, pathStyle, accessKeyId, secretAccessKey, bucketName, region, cdnDomain } = s3Channel;
+    const { endpoint, pathStyle, accessKeyId, secretAccessKey, bucketName, region } = s3Channel;
 
     // 创建 S3 客户端
     const s3Client = new S3Client({
@@ -389,25 +411,7 @@ async function uploadFileToS3(context, fullId, metadata, returnLink) {
         // 更新 metadata
         metadata.Channel = "S3";
         metadata.ChannelName = s3Channel.name;
-
-        const s3ServerDomain = endpoint.replace(/https?:\/\//, "");
-        if (pathStyle) {
-            metadata.S3Location = `https://${s3ServerDomain}/${bucketName}/${s3FileName}`; // 采用路径风格的 URL
-        } else {
-            metadata.S3Location = `https://${bucketName}.${s3ServerDomain}/${s3FileName}`; // 采用虚拟主机风格的 URL
-        }
-        metadata.S3Endpoint = endpoint;
-        metadata.S3PathStyle = pathStyle;
-        metadata.S3AccessKeyId = accessKeyId;
-        metadata.S3SecretAccessKey = secretAccessKey;
-        metadata.S3Region = region || "auto";
-        metadata.S3BucketName = bucketName;
         metadata.S3FileKey = s3FileName;
-        // 保存 CDN 文件完整路径（如果配置了 CDN 域名）
-        if (cdnDomain) {
-            // 存储完整的 CDN 文件路径，而不是仅存储域名
-            metadata.S3CdnFileUrl = `${cdnDomain.replace(/\/$/, '')}/${s3FileName}`;
-        }
 
         // 图像审查
         if (uploadModerate && uploadModerate.enabled) {
@@ -432,12 +436,7 @@ async function uploadFileToS3(context, fullId, metadata, returnLink) {
         // 结束上传
         waitUntil(endUpload(context, fullId, metadata));
 
-        return createResponse(JSON.stringify([{ src: returnLink }]), {
-            status: 200,
-            headers: {
-                "Content-Type": "application/json",
-            },
-        });
+        return buildUploadResponse(context, returnLink);
     } catch (error) {
         return createResponse(`Error: Failed to upload to S3 - ${error.message}`, { status: 500 });
     }
@@ -502,16 +501,15 @@ async function uploadFileToTelegram(context, fullId, metadata, fileExt, fileName
     };
 
     const defaultType = { 'url': 'sendDocument', 'type': 'document' };
-    const baseFileType = getMimeTypeBase(fileType);
 
-    let sendFunction = Object.keys(fileTypeMap).find(key => baseFileType.startsWith(key))
-        ? fileTypeMap[Object.keys(fileTypeMap).find(key => baseFileType.startsWith(key))]
+    let sendFunction = Object.keys(fileTypeMap).find(key => fileType.startsWith(key))
+        ? fileTypeMap[Object.keys(fileTypeMap).find(key => fileType.startsWith(key))]
         : defaultType;
 
     // GIF ICO 等发送接口特殊处理
-    if (baseFileType === 'image/gif' || baseFileType === 'image/webp' || fileExt === 'gif' || fileExt === 'webp') {
+    if (fileType === 'image/gif' || fileType === 'image/webp' || fileExt === 'gif' || fileExt === 'webp') {
         sendFunction = { 'url': 'sendAnimation', 'type': 'animation' };
-    } else if (baseFileType === 'image/svg+xml' || baseFileType === 'image/x-icon') {
+    } else if (fileType === 'image/svg+xml' || fileType === 'image/x-icon') {
         sendFunction = { 'url': 'sendDocument', 'type': 'document' };
     }
 
@@ -531,15 +529,7 @@ async function uploadFileToTelegram(context, fullId, metadata, fileExt, fileName
         metadata.FileSize = (fileInfo.file_size / 1024 / 1024).toFixed(2);
 
         // 将响应返回给客户端
-        res = createResponse(
-            JSON.stringify([{ 'src': `${returnLink}` }]),
-            {
-                status: 200,
-                headers: {
-                    'Content-Type': 'application/json',
-                }
-            }
-        );
+        res = buildUploadResponse(context, returnLink);
 
 
         // 图像审查（使用代理域名或官方域名）
@@ -553,12 +543,6 @@ async function uploadFileToTelegram(context, fullId, metadata, fileExt, fileName
             metadata.ChannelName = tgChannel.name;
 
             metadata.TgFileId = id;
-            metadata.TgChatId = tgChatId;
-            metadata.TgBotToken = tgBotToken;
-            // 保存代理域名配置
-            if (tgProxyUrl) {
-                metadata.TgProxyUrl = tgProxyUrl;
-            }
             await db.put(fullId, "", {
                 metadata: metadata,
             });
@@ -605,15 +589,7 @@ async function uploadFileToExternal(context, fullId, metadata, returnLink) {
     waitUntil(endUpload(context, fullId, metadata));
 
     // 返回结果
-    return createResponse(
-        JSON.stringify([{ 'src': `${returnLink}` }]),
-        {
-            status: 200,
-            headers: {
-                'Content-Type': 'application/json',
-            }
-        }
-    );
+    return buildUploadResponse(context, returnLink);
 }
 
 
@@ -672,15 +648,8 @@ async function uploadFileToDiscord(context, fullId, metadata, returnLink) {
         metadata.ChannelName = discordChannel.name || "Discord_env";
         metadata.FileSize = (fileInfo.file_size / 1024 / 1024).toFixed(2);
         metadata.DiscordMessageId = fileInfo.message_id;
-        metadata.DiscordChannelId = discordChannel.channelId;
-        metadata.DiscordBotToken = discordChannel.botToken;
         // 注意：不存储 DiscordAttachmentUrl，因为 Discord 附件 URL 会在约24小时后过期
         // 读取时会通过 API 获取新的 URL
-
-        // 如果配置了代理 URL，保存代理信息
-        if (discordChannel.proxyUrl) {
-            metadata.DiscordProxyUrl = discordChannel.proxyUrl;
-        }
 
         // 图像审查（使用 Discord CDN URL 或代理 URL）
         let moderateUrl = fileInfo.url;
@@ -700,13 +669,7 @@ async function uploadFileToDiscord(context, fullId, metadata, returnLink) {
         waitUntil(endUpload(context, fullId, metadata));
 
         // 返回成功响应
-        return createResponse(
-            JSON.stringify([{ 'src': returnLink }]),
-            {
-                status: 200,
-                headers: { 'Content-Type': 'application/json' }
-            }
-        );
+        return buildUploadResponse(context, returnLink);
 
     } catch (error) {
         console.error('Discord upload error:', error.message);
@@ -785,11 +748,7 @@ async function uploadFileToHuggingFace(context, fullId, metadata, returnLink) {
         // 更新 metadata
         metadata.Channel = "HuggingFace";
         metadata.ChannelName = hfChannel.name || "HuggingFace_env";
-        metadata.HfRepo = hfChannel.repo;
         metadata.HfFilePath = hfFilePath;
-        metadata.HfToken = hfChannel.token;
-        metadata.HfIsPrivate = hfChannel.isPrivate || false;
-        metadata.HfFileUrl = result.fileUrl;
 
         // 图像审查
         const securityConfig = context.securityConfig;
@@ -824,17 +783,85 @@ async function uploadFileToHuggingFace(context, fullId, metadata, returnLink) {
         waitUntil(endUpload(context, fullId, metadata));
 
         // 返回成功响应
-        return createResponse(
-            JSON.stringify([{ 'src': returnLink }]),
-            {
-                status: 200,
-                headers: { 'Content-Type': 'application/json' }
-            }
-        );
+        return buildUploadResponse(context, returnLink);
 
     } catch (error) {
         console.error('HuggingFace upload error:', error.message);
         return createResponse(`Error: HuggingFace upload failed - ${error.message}`, { status: 500 });
+    }
+}
+
+
+// 上传到 WebDAV
+async function uploadFileToWebDAV(context, fullId, metadata, returnLink) {
+    const { env, waitUntil, uploadConfig, securityConfig, url, formdata, specifiedChannelName } = context;
+    const db = getDatabase(env);
+
+    const webdavSettings = uploadConfig.webdav;
+    if (!webdavSettings || !webdavSettings.channels || webdavSettings.channels.length === 0) {
+        return createResponse('Error: No WebDAV channel configured', { status: 400 });
+    }
+
+    const webdavChannels = webdavSettings.channels;
+    let webdavChannel;
+    if (specifiedChannelName) {
+        webdavChannel = webdavChannels.find(ch => ch.name === specifiedChannelName);
+    }
+    if (!webdavChannel) {
+        webdavChannel = webdavSettings.loadBalance?.enabled
+            ? webdavChannels[Math.floor(Math.random() * webdavChannels.length)]
+            : webdavChannels[0];
+    }
+
+    if (!webdavChannel || !webdavChannel.baseUrl) {
+        return createResponse('Error: WebDAV channel not properly configured', { status: 400 });
+    }
+
+    const file = formdata.get('file');
+    if (!file) {
+        return createResponse('Error: No file provided', { status: 400 });
+    }
+
+    try {
+        const webdavAPI = new WebDAVAPI(webdavChannel);
+        await webdavAPI.putFile(fullId, file, file.type || metadata.FileType || 'application/octet-stream');
+
+        metadata.Channel = "WebDAV";
+        metadata.ChannelName = webdavChannel.name || "WebDAV_env";
+        metadata.WebDAVFilePath = fullId;
+        const webdavPublicUrl = webdavChannel.publicUrl
+            ? webdavAPI.buildPublicUrl(fullId, webdavChannel.publicUrl)
+            : '';
+
+        const uploadModerate = securityConfig.upload?.moderate;
+        if (uploadModerate && uploadModerate.enabled) {
+            if (webdavPublicUrl) {
+                metadata.Label = await moderateContent(env, webdavPublicUrl);
+            } else {
+                try {
+                    await db.put(fullId, "", { metadata });
+                } catch {
+                    return createResponse('Error: Failed to write to database', { status: 500 });
+                }
+
+                const moderateUrl = `https://${url.hostname}/file/${fullId}`;
+                await purgeCDNCache(env, moderateUrl, url);
+                metadata.Label = await moderateContent(env, moderateUrl);
+            }
+        }
+
+        try {
+            await db.put(fullId, "", { metadata });
+        } catch {
+            return createResponse('Error: Failed to write to database', { status: 500 });
+        }
+
+        waitUntil(endUpload(context, fullId, metadata));
+
+        return buildUploadResponse(context, returnLink);
+    } catch (error) {
+        console.error('WebDAV upload error:', error.message);
+        return createResponse(`Error: WebDAV upload failed - ${error.message}`, { status: 500 });
     }
 }
 
@@ -844,7 +871,7 @@ async function tryRetry(err, context, uploadChannel, fullId, metadata, fileExt, 
     const { env, url, formdata } = context;
 
     // 渠道列表（Discord 因为有 10MB 限制，放在最后尝试）
-    const channelList = ['CloudflareR2', 'TelegramNew', 'S3', 'HuggingFace', 'Discord'];
+    const channelList = ['CloudflareR2', 'TelegramNew', 'S3', 'HuggingFace', 'WebDAV', 'Discord'];
     const errMessages = {};
     errMessages[uploadChannel] = 'Error: ' + uploadChannel + err;
 
@@ -859,6 +886,8 @@ async function tryRetry(err, context, uploadChannel, fullId, metadata, fileExt, 
         retryRes = await uploadFileToS3(context, fullId, metadata, returnLink);
     } else if (uploadChannel === 'HuggingFace') {
         retryRes = await uploadFileToHuggingFace(context, fullId, metadata, returnLink);
+    } else if (uploadChannel === 'WebDAV') {
+        retryRes = await uploadFileToWebDAV(context, fullId, metadata, returnLink);
     } else if (uploadChannel === 'Discord') {
         retryRes = await uploadFileToDiscord(context, fullId, metadata, returnLink);
     }
@@ -882,6 +911,8 @@ async function tryRetry(err, context, uploadChannel, fullId, metadata, fileExt, 
                 res = await uploadFileToS3(context, fullId, metadata, returnLink);
             } else if (channelList[i] === 'HuggingFace') {
                 res = await uploadFileToHuggingFace(context, fullId, metadata, returnLink);
+            } else if (channelList[i] === 'WebDAV') {
+                res = await uploadFileToWebDAV(context, fullId, metadata, returnLink);
             } else if (channelList[i] === 'Discord') {
                 res = await uploadFileToDiscord(context, fullId, metadata, returnLink);
             }
