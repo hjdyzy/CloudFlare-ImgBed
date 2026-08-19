@@ -5,6 +5,9 @@ import {
     moderateContent, purgeCDNCache, isBlockedUploadIp, buildUniqueFileId, endUpload, getImageDimensions,
     sanitizeUploadFolder
 } from "./uploadTools";
+import {
+    smartContentType, addCharsetIfNeeded, validateAndNormalizeContentType
+} from "../utils/textFileDetector";
 import { initializeChunkedUpload, handleChunkUpload, uploadLargeFileToTelegram, handleCleanupRequest } from "./chunkUpload";
 import { handleChunkMerge } from "./chunkMerge";
 import { TelegramAPI } from "../utils/storage/telegramAPI";
@@ -133,7 +136,12 @@ async function processFileUpload(context, formdata = null) {
     // 获取文件信息
     const time = new Date().getTime();
     const file = formdata.get('file');
-    const fileType = file.type;
+    const customContentType = formdata.get('customContentType');
+    let fileType = customContentType || file.type;
+    if (customContentType) {
+        fileType = validateAndNormalizeContentType(fileType);
+    }
+    fileType = addCharsetIfNeeded(smartContentType(fileType, file.name));
     let fileName = file.name;
     const fileSizeBytes = file.size; // 文件大小，单位字节
     const fileSize = (fileSizeBytes / 1024 / 1024).toFixed(2); // 文件大小，单位MB

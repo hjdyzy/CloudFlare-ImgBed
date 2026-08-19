@@ -71,8 +71,15 @@ export async function onRequest(context) {  // Contents of context object
 
     // 从数据库中获取图片记录
     const db = getDatabase(env);
-    const imgRecord = await db.getWithMetadata(fileId);
-    if (!imgRecord) {
+    let imgRecord = await db.getWithMetadata(fileId);
+    const recordMissing = record => !record || (record.value === null && record.metadata === null);
+    if (recordMissing(imgRecord)) {
+        const indexRecord = await db.getWithMetadata(`${fileId}/index.html`);
+        if (!recordMissing(indexRecord)) {
+            imgRecord = indexRecord;
+        }
+    }
+    if (recordMissing(imgRecord)) {
         return new Response('Error: Image Not Found', { status: 404 });
     }
 
